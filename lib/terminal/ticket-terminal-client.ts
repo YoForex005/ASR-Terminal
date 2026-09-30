@@ -1373,13 +1373,27 @@ export class TerminalTicketRealtimeClient {
       ? Math.min(MAX_BACKEND_CHART_LIMIT, limit * (timeframeMinutes / baseTimeframeMinutes))
       : limit;
 
+    // Without a lower bound the backend asks MT5 for every M1 bar since 1970 and
+    // keeps only the last `limit` (5s+ for long-history symbols, which held the
+    // opening overlay up on every refresh). Bound the window to the page size
+    // with wide headroom for weekends/holidays; bar times are broker-server
+    // epochs, so the extra week also covers the server-vs-UTC offset.
+    const windowSeconds = baseLimit * baseTimeframeMinutes * 60 * 4 + 7 * 24 * 60 * 60;
+    const toSeconds = to !== undefined ? parseNumber(to, 0) : 0;
+    const windowEndSeconds = toSeconds > 0
+      ? (toSeconds > 10_000_000_000 ? Math.floor(toSeconds / 1000) : toSeconds)
+      : Math.floor(Date.now() / 1000);
+    const from = options.from !== undefined
+      ? options.from
+      : Math.max(1, windowEndSeconds - windowSeconds);
+
     const payload: JsonRecord = {
       type: 'chart.request',
       symbol: normalizedSymbol,
       timeframe: formatBackendTimeframe(baseTimeframeMinutes),
       timeframeMinutes: baseTimeframeMinutes,
       limit: baseLimit,
-      ...(options.from !== undefined ? { from: options.from } : {}),
+      from,
       ...(to !== undefined ? { to } : {}),
       ...(options.before !== undefined ? { before: options.before } : {}),
     };

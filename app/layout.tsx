@@ -27,8 +27,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
-      <body className="bg-background font-sans text-foreground antialiased">
+    // #0e0f11 = the opening overlay colour: the first paint before the overlay
+    // mounts matches it instead of flashing the theme background.
+    <html lang="en" className="dark" style={{ colorScheme: "dark", backgroundColor: "#0e0f11" }} suppressHydrationWarning>
+      <body className="bg-[#0e0f11] font-sans text-foreground antialiased">
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"

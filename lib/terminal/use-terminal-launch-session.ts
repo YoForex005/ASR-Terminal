@@ -16,6 +16,7 @@ import {
   refreshTerminalWsTickets,
   getTerminalWsBaseUrl,
 } from '@/lib/terminal/ticket-terminal-client';
+import { rememberTerminalLaunchSuccess } from '@/lib/terminal/terminal-relaunch';
 
 type LaunchStatus =
   | 'idle'
@@ -387,6 +388,7 @@ export const useTerminalLaunchSession = (
 
         didExchange = true;
         storeTerminalSession(payload);
+        rememberTerminalLaunchSuccess(parseLogin(getAccountContext(payload)));
         setExchange(payload);
         if (sessionStart.mode === 'launch-code') {
           removeLaunchCodeFromLocation();

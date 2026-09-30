@@ -10,6 +10,7 @@ import {
     getTerminalDashboardUrl,
     isTerminalSessionEndedError,
 } from '@/lib/terminal/ticket-terminal-client';
+import { relaunchTerminalFromDashboard } from '@/lib/terminal/terminal-relaunch';
 import { Clock, CheckCircle2, X, AlarmClock, Server, Wifi, ChevronDown, ChevronRight, Menu, TrendingUp, Briefcase, Globe, Settings, Bell, Calendar } from 'lucide-react';
 import { useAuth } from '@/components/auth/auth-provider';
 import Header from '@/components/terminal/Header';
@@ -2648,12 +2649,12 @@ function TerminalPageLoadingShell() {
     );
 }
 
-function TerminalLaunchLoadingOverlay({ error }: { error?: string | null }) {
+function TerminalLaunchLoadingOverlay({ error, exiting = false }: { error?: string | null; exiting?: boolean }) {
     const hasError = Boolean(error);
 
     return (
         <div
-            className="fixed inset-0 z-[10000] flex items-center justify-center bg-[#0e0f11]"
+            className={`fixed inset-0 z-[10000] flex items-center justify-center bg-[#0e0f11] transition-opacity duration-300 ease-out ${exiting ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
             role={hasError ? 'alert' : 'status'}
             aria-label={hasError ? 'Terminal launch failed' : 'Opening terminal'}
         >
@@ -2713,12 +2714,17 @@ function TerminalLaunchLoadingOverlay({ error }: { error?: string | null }) {
                     <TerminalErrorActions />
                 </div>
             ) : (
-                <div className="terminal-launch-loading-dots" aria-hidden="true">
-                    <span className="terminal-launch-loading-dot" />
-                    <span className="terminal-launch-loading-dot" />
-                    <span className="terminal-launch-loading-dot" />
-                    <span className="terminal-launch-loading-dot" />
-                    <span className="terminal-launch-loading-dot" />
+                // Same logo + dot wave as the dashboard's /terminal-launch screen, so a
+                // silent re-launch reads as one continuous loading screen.
+                <div className="flex flex-col items-center gap-7">
+                    <img src="/brand/ASR.svg" alt="ASR" width={170} height={38} className="h-[38px] w-auto select-none opacity-95" draggable={false} />
+                    <div className="terminal-launch-loading-dots" aria-hidden="true">
+                        <span className="terminal-launch-loading-dot" />
+                        <span className="terminal-launch-loading-dot" />
+                        <span className="terminal-launch-loading-dot" />
+                        <span className="terminal-launch-loading-dot" />
+                        <span className="terminal-launch-loading-dot" />
+                    </div>
                 </div>
             )}
         </div>
@@ -8745,22 +8751,58 @@ function TradingDashboardInner() {
         setActivePanel((current) => (current === panel ? null : panel));
     }, []);
 
-    if (isLoadingTerminalAccountData) {
+    // No launch code, no resumable tab session and no dashboard account: there is
+    // nothing to connect. Same for an expired session or a spent launch link.
+    const hasNoTerminalSession =
+        !isLoadingTerminalAccountData &&
+        !terminalLaunchSession.isActive &&
+        !activeTradingAccount &&
+        !isSnapshotLoading;
+    const isTerminalSessionEnded =
+        hasNoTerminalSession ||
+        isTerminalSessionEndedError(terminalLaunchSession.error) ||
+        isTerminalSessionEndedError(connectError);
+    // Keep the opening overlay mounted for its 300ms fade-out once the terminal
+    // is ready, instead of cutting straight from black to the full UI.
+    const [isOpeningOverlayMounted, setIsOpeningOverlayMounted] = useState(terminalOpeningOverlayActive);
+    useEffect(() => {
+        if (terminalOpeningOverlayActive) {
+            setIsOpeningOverlayMounted(true);
+            return;
+        }
+        const timeoutId = window.setTimeout(() => setIsOpeningOverlayMounted(false), 320);
+        return () => window.clearTimeout(timeoutId);
+    }, [terminalOpeningOverlayActive]);
+    const [terminalRelaunchState, setTerminalRelaunchState] =
+        useState<'idle' | 'redirecting' | 'unavailable'>('idle');
+    useEffect(() => {
+        if (!isTerminalSessionEnded || terminalRelaunchState !== 'idle') return;
+        // Bounce through the dashboard for a fresh launch link. Falls back to the
+        // "session ended" screen when no dashboard URL is configured or a relaunch
+        // just came back without a working session (loop guard).
+        setTerminalRelaunchState(
+            relaunchTerminalFromDashboard(terminalLaunchSession.account?.accountNumber)
+                ? 'redirecting'
+                : 'unavailable',
+        );
+    }, [isTerminalSessionEnded, terminalLaunchSession.account?.accountNumber, terminalRelaunchState]);
+
+    if (isLoadingTerminalAccountData || (isTerminalSessionEnded && terminalRelaunchState !== 'unavailable')) {
         // Same black-dots open experience as launch; do not flash a skeleton then a blank chart.
         return <TerminalLaunchLoadingOverlay />;
     }
 
-    // No launch code, no resumable tab session and no dashboard account: there is
-    // nothing to connect, so send the user back to the dashboard instead of
-    // rendering an empty "Account #unknown" terminal.
-    if (!terminalLaunchSession.isActive && !activeTradingAccount && !isSnapshotLoading) {
+    if (hasNoTerminalSession) {
         return <TerminalLaunchLoadingOverlay error={TERMINAL_SESSION_ENDED_MESSAGE} />;
     }
 
     return (
         <>
-        {terminalOpeningOverlayActive && (
-            <TerminalLaunchLoadingOverlay error={terminalLaunchSession.error} />
+        {isOpeningOverlayMounted && (
+            <TerminalLaunchLoadingOverlay
+                error={terminalLaunchSession.error}
+                exiting={!terminalOpeningOverlayActive}
+            />
         )}
         <div
             aria-hidden={terminalOpeningOverlayActive ? true : undefined}
