@@ -11,9 +11,12 @@ const DEFAULT_TERMINAL_PROXY_ORIGIN = "https://terminal.yopips.com";
 const TERMINAL_PROXY_JWT_TTL_SECONDS = 5 * 60;
 
 // Public terminal session exchange may run without a CRM cookie when using a
-// one-time launch code. Everything else requires an authenticated session.
+// one-time launch code. WS ticket refresh is authorized by the backend from the
+// terminal token (Bearer, forwarded as-is); a refreshed tab resumes through it.
+// Everything else requires an authenticated session.
 const PUBLIC_TERMINAL_PROXY_PATHS = new Set([
   "sessions/exchange",
+  "sessions/refresh-ws-tickets",
 ]);
 
 const getTerminalBackendBase = (): string => resolveTerminalBackendOrigin();

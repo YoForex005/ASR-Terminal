@@ -236,6 +236,22 @@ export const getTerminalWsBaseUrl = (): string => {
   return process.env.NEXT_PUBLIC_WS_URL || '';
 };
 
+// Users reach the terminal from the dashboard with a one-time launch code; the
+// terminal has no login of its own. When neither a launch code nor a resumable
+// tab session exists, the user has to reopen the terminal from the dashboard.
+export const TERMINAL_SESSION_ENDED_MESSAGE =
+  'Your terminal session has ended. Please open the terminal again from your dashboard.';
+export const TERMINAL_LAUNCH_LINK_USED_MESSAGE =
+  'This terminal link has already been used or has expired. Please open the terminal again from your dashboard.';
+
+export const isTerminalSessionEndedError = (message: string | null | undefined): boolean =>
+  message === TERMINAL_SESSION_ENDED_MESSAGE ||
+  message === TERMINAL_LAUNCH_LINK_USED_MESSAGE ||
+  /session expired\. Reopen it from the dashboard/i.test(message ?? '');
+
+export const getTerminalDashboardUrl = (): string =>
+  (process.env.NEXT_PUBLIC_DASHBOARD_URL ?? '').trim().replace(/\/+$/, '');
+
 export const exchangeTerminalLaunchCode = async (
   launchCode: string,
   apiBaseUrl = getTerminalApiBaseUrl(),
@@ -248,6 +264,10 @@ export const exchangeTerminalLaunchCode = async (
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !isRecord(payload)) {
+    const errorCode = isRecord(payload) && isRecord(payload.error) ? parseString(payload.error.code) : '';
+    if (errorCode === 'LAUNCH_CODE_CONSUMED' || errorCode === 'LAUNCH_CODE_EXPIRED' || response.status === 410) {
+      throw new Error(TERMINAL_LAUNCH_LINK_USED_MESSAGE);
+    }
     throw new Error(
       getErrorPayloadMessage(
         payload,
@@ -271,6 +291,9 @@ export const createTerminalLaunchSession = async (
   });
 
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(TERMINAL_SESSION_ENDED_MESSAGE);
+  }
   if (!response.ok || !isRecord(payload)) {
     throw new Error(
       getErrorPayloadMessage(
@@ -872,7 +895,31 @@ const getPayloadArray = (source: JsonRecord, ...keys: string[]): unknown[] => {
   return [];
 };
 
-const parseTimeframeMinutes = (value: unknown, fallback = 1): number => {
+// history.closed returns raw MT5 deals in backend wire format
+// (entry "IN"/"OUT", type "BUY"/"SELL", close_price, lot_size, close_time in
+// unix seconds). Normalize to the Deal shape the terminal UI filters on.
+const mapTerminalDeal = (row: unknown): Deal | null => {
+  if (!isRecord(row)) return null;
+  const entry = parseString(row.entry, 'in').toLowerCase();
+  const positionId = parseInteger(row.position_id ?? row.positionId ?? row.position);
+  return {
+    ticket: parseInteger(row.deal_id ?? row.ticket),
+    orderTicket: parseInteger(row.order ?? row.orderTicket),
+    symbol: parseString(row.symbol),
+    type: parseString(row.type, 'buy').toLowerCase() as Deal['type'],
+    entry: (['in', 'out', 'inout', 'outby'].includes(entry) ? entry : 'in') as Deal['entry'],
+    volume: parseNumber(row.lot_size ?? row.volume),
+    price: parseNumber(row.close_price ?? row.price ?? row.open_price),
+    commission: parseNumber(row.commission),
+    swap: parseNumber(row.swap),
+    profit: parseNumber(row.profit),
+    comment: parseString(row.comment) || undefined,
+    time: parseDate(row.close_time ?? row.time ?? row.time_msc),
+    positionId: positionId > 0 ? positionId : undefined,
+  };
+};
+
+const parseTimeframeMinutes =(value: unknown, fallback = 1): number => {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return Math.trunc(value);
   }
@@ -903,7 +950,55 @@ const formatBackendTimeframe = (minutes: number): string => {
   return `M${minutes}`;
 };
 
-const normalizeChartHistorySource = (value: unknown): string => {
+// The terminal feed only serves these chart timeframes (CHART_BAD_TIMEFRAME
+// otherwise). Others (30m, 1W, 1M=30D, 1Y=365D) are built client-side from the
+// largest supported timeframe that divides them evenly.
+const BACKEND_CHART_TIMEFRAME_MINUTES = [1440, 240, 60, 15, 5, 1] as const;
+const MAX_BACKEND_CHART_LIMIT = 5_000;
+
+const resolveChartBaseTimeframeMinutes = (minutes: number): number =>
+  BACKEND_CHART_TIMEFRAME_MINUTES.find((base) => minutes % base === 0) ?? 1;
+
+// Buckets match the chart's own floor(time / bucket) * bucket slots so history
+// candles line up with the live candle builder.
+const aggregateChartBars = (bars: unknown[], bucketSeconds: number): JsonRecord[] => {
+  const buckets = new Map<number, JsonRecord>();
+  const rows = bars
+    .filter(isRecord)
+    .map((bar) => ({ bar, time: parseInteger(bar.time) }))
+    .filter(({ time }) => time > 0)
+    .sort((left, right) => left.time - right.time);
+
+  for (const { bar, time } of rows) {
+    const bucketTime = Math.floor(time / bucketSeconds) * bucketSeconds;
+    const high = parseNumber(bar.high);
+    const low = parseNumber(bar.low);
+    const current = buckets.get(bucketTime);
+    if (!current) {
+      buckets.set(bucketTime, {
+        time: bucketTime,
+        time_msc: bucketTime * 1000,
+        open: parseNumber(bar.open),
+        high,
+        low,
+        close: parseNumber(bar.close),
+        tick_volume: parseNumber(bar.tick_volume),
+        spread: parseNumber(bar.spread),
+        volume: parseNumber(bar.volume),
+      });
+      continue;
+    }
+    current.high = Math.max(parseNumber(current.high), high);
+    current.low = Math.min(parseNumber(current.low), low);
+    current.close = parseNumber(bar.close);
+    current.tick_volume = parseNumber(current.tick_volume) + parseNumber(bar.tick_volume);
+    current.volume = parseNumber(current.volume) + parseNumber(bar.volume);
+  }
+
+  return [...buckets.values()];
+};
+
+const normalizeChartHistorySource =(value: unknown): string => {
   const source = parseString(value);
   return !source || source === 'terminal-feed' ? 'chart.history' : source;
 };
@@ -1238,9 +1333,11 @@ export class TerminalTicketRealtimeClient {
       },
       ['result', 'history.closed'],
     );
-    const rows = getPayloadArray(getFramePayload(payload), 'history', 'deals', 'trades', 'rows');
+    const rows = getPayloadArray(getFramePayload(payload), 'history', 'deals', 'trades', 'rows')
+      .map(mapTerminalDeal)
+      .filter((deal): deal is Deal => deal !== null);
     this.streamRouter.publish('account.history', rows);
-    return rows as Deal[];
+    return rows;
   }
 
   private async requestChartHistory(
@@ -1260,18 +1357,34 @@ export class TerminalTicketRealtimeClient {
       throw new Error('Chart history request requires a symbol.');
     }
 
+    // The terminal feed only bounds chart.request by from/to (inclusive, epoch
+    // seconds or ms). It ignores `before`, which made every scroll-back page
+    // return the newest bars again. Express "older than X" as to = X - 1s.
+    const beforeMs = parseNumber(options.before, 0);
+    const beforeAsToSeconds = beforeMs > 0
+      ? Math.floor((beforeMs > 10_000_000_000 ? beforeMs / 1000 : beforeMs) - 1)
+      : undefined;
+    const to = options.to !== undefined ? options.to : beforeAsToSeconds;
+
+    const limit = options.limit ?? 100;
+    const baseTimeframeMinutes = resolveChartBaseTimeframeMinutes(timeframeMinutes);
+    const needsAggregation = baseTimeframeMinutes !== timeframeMinutes;
+    const baseLimit = needsAggregation
+      ? Math.min(MAX_BACKEND_CHART_LIMIT, limit * (timeframeMinutes / baseTimeframeMinutes))
+      : limit;
+
     const payload: JsonRecord = {
       type: 'chart.request',
       symbol: normalizedSymbol,
-      timeframe: formatBackendTimeframe(timeframeMinutes),
-      timeframeMinutes,
-      limit: options.limit ?? 100,
+      timeframe: formatBackendTimeframe(baseTimeframeMinutes),
+      timeframeMinutes: baseTimeframeMinutes,
+      limit: baseLimit,
       ...(options.from !== undefined ? { from: options.from } : {}),
-      ...(options.to !== undefined ? { to: options.to } : {}),
+      ...(to !== undefined ? { to } : {}),
       ...(options.before !== undefined ? { before: options.before } : {}),
     };
 
-    return this.enqueueChartHistoryRequest(
+    const frame = await this.enqueueChartHistoryRequest(
       () => this.sendFeedRequest<JsonRecord>(
         payload,
         ['chart.history'],
@@ -1279,6 +1392,20 @@ export class TerminalTicketRealtimeClient {
       ),
       options.priority ?? 'foreground',
     );
+    if (!needsAggregation) return frame;
+
+    const baseBars = getPayloadArray(frame, 'bars');
+    const bars = aggregateChartBars(baseBars, timeframeMinutes * 60);
+    // A full base page was cut off by the limit, so its oldest bucket may be
+    // missing earlier base bars. Drop it; the next scroll-back page fills it.
+    if (baseBars.length >= baseLimit && bars.length > 1) bars.shift();
+    return {
+      ...frame,
+      timeframe: formatBackendTimeframe(timeframeMinutes),
+      timeframeMinutes,
+      count: bars.length,
+      bars,
+    };
   }
 
   private enqueueChartHistoryRequest(

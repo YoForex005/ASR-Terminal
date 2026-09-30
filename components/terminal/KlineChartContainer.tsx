@@ -460,6 +460,11 @@ const CENTERED_POSITION_BADGE_STYLE =
 const OPEN_TRADE_LINE_COLOR = '#ffffff';
 const TAKE_PROFIT_LINE_COLOR = '#22c55e';
 const STOP_LOSS_LINE_COLOR = '#facc15';
+// Canvas (lightweight-charts) cannot resolve CSS var() colours - they render black.
+// Concrete equivalents of the theme --success / --destructive tokens.
+const BUY_CHART_COLOR = '#46cd7c';
+const SELL_CHART_COLOR = '#f23645';
+const CHART_AXIS_LABEL_TEXT_COLOR = '#ffffff';
 type DataLayoutMode = 'focus-latest' | 'preserve-visible' | 'preserve-or-follow-latest';
 type LogicalRangeSnapshot = { from: number; to: number };
 type VisibleAnchorSnapshot = { realTime: number; logicalIndex: number };
@@ -2451,7 +2456,8 @@ function KlineChartContainer({
 
             for (const position of visiblePositions) {
                 const isBuy = position.type === 'buy';
-                const openColor = isBuy ? 'hsl(var(--success))' : 'hsl(var(--destructive))'; // Green for Buy, Red for Sell
+                const openColor = isBuy ? 'hsl(var(--success))' : 'hsl(var(--destructive))'; // Green for Buy, Red for Sell (DOM overlays)
+                const openAxisLabelColor = isBuy ? BUY_CHART_COLOR : SELL_CHART_COLOR;
                 const slColor = STOP_LOSS_LINE_COLOR;
                 const tpColor = TAKE_PROFIT_LINE_COLOR;
 
@@ -2802,8 +2808,8 @@ function KlineChartContainer({
                             lineWidth: 1, // changed from 0.5 to 1 (minimum allowed)
                             lineStyle: LineStyle.Solid,
                             axisLabelVisible: true,
-                            axisLabelColor: openColor,
-                            axisLabelTextColor: 'hsl(var(--background))',
+                            axisLabelColor: openAxisLabelColor,
+                            axisLabelTextColor: CHART_AXIS_LABEL_TEXT_COLOR,
                         }),
                         mainOverlay: createOrUpdateOverlay(
                             'open',
@@ -2817,8 +2823,8 @@ function KlineChartContainer({
                     state.mainLine.applyOptions({
                         price: position.openPrice,
                         color: OPEN_TRADE_LINE_COLOR,
-                        axisLabelColor: openColor,
-                        axisLabelTextColor: 'hsl(var(--background))',
+                        axisLabelColor: openAxisLabelColor,
+                        axisLabelTextColor: CHART_AXIS_LABEL_TEXT_COLOR,
                     });
                     createOrUpdateOverlay('open', position.openPrice, openColor, openLabelText, `${position.type.toUpperCase()} open. Drag above/below to set TP or SL.`, state.mainOverlay);
                 }
@@ -3484,7 +3490,7 @@ function KlineChartContainer({
                 markers.push({
                     time: seriesTime,
                     position: pos.type === 'buy' ? 'belowBar' : 'aboveBar',
-                    color: pos.type === 'buy' ? 'hsl(var(--success))' : 'hsl(var(--destructive))',
+                    color: pos.type === 'buy' ? BUY_CHART_COLOR : SELL_CHART_COLOR,
                     shape: pos.type === 'buy' ? 'arrowUp' : 'arrowDown',
                     text: `${pos.type === 'buy' ? 'B' : 'S'} ${pos.volume.toFixed(2)}`,
                     size: 1,

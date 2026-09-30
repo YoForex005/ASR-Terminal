@@ -1391,6 +1391,8 @@ type OhlcSanityRejectionWarningDisposition =
 
 type OhlcSanityEvaluationOptions = {
   rejectAnchoredCloseSpike?: boolean;
+  // Bar timeframe; above OHLCSANITY_SPIKE_CHECK_MAX_BUCKET_MS only structure/domain checks apply.
+  bucketMs?: number;
 };
 
 type OhlcSanityReferenceTrackerAcceptOptions = {
@@ -1420,6 +1422,8 @@ export const OHLCSANITY_REJECTED_LOG_KEY_LIMIT = 2_048;
 const OHLCSANITY_MIN_STALE_REFERENCE_GAP_MS = 10 * 60 * 1000;
 const OHLCSANITY_STALE_REFERENCE_GAP_BUCKETS = 20;
 const LIVE_BUCKET_ROLLOVER_GRACE_MS = 0;
+
+const OHLCSANITY_SPIKE_CHECK_MAX_BUCKET_MS = 60 * 60 * 1000;
 
 const OHLCSANITY_THRESHOLDS: Record<OhlcSanitySymbolClass, OhlcSanityThresholds> = {
   // Major FX pairs (EUR/USD, GBP/USD, AUD/USD, USD/CHF …)
@@ -1769,6 +1773,10 @@ export function evaluateOhlcBarSanity(
   );
   if (!structureDecision.accepted) {
     return structureDecision;
+  }
+
+  if (options.bucketMs != null && options.bucketMs > OHLCSANITY_SPIKE_CHECK_MAX_BUCKET_MS) {
+    return { accepted: true };
   }
 
   // No reference only bypasses reference-dependent outlier checks.
@@ -2174,6 +2182,26 @@ function filterChronologicalOhlcBarsBySanity(
   const orderedBars = [...bars].sort(
     (left, right) => getOhlcSanityBarTime(left) - getOhlcSanityBarTime(right),
   );
+
+  // Spike thresholds (e.g. 8% range for metals) are tuned for intraday bars.
+  // Genuine H4/D1/W1+ broker candles routinely exceed them, and rejecting them
+  // punches holes in scrolled-back history. Keep only structure/domain checks.
+  if (bucketMs != null && bucketMs > OHLCSANITY_SPIKE_CHECK_MAX_BUCKET_MS) {
+    const acceptedBars: OHLCBar[] = [];
+    for (const bar of orderedBars) {
+      const decision = evaluateOhlcStructureAndDomainSanity(symbol, bar);
+      if (!decision.accepted) {
+        onRejected?.(bar, decision);
+        continue;
+      }
+      acceptedBars.push(bar);
+    }
+    for (const bar of acceptedBars) {
+      onAccepted?.(bar);
+    }
+    return acceptedBars;
+  }
+
   const firstReferenceBar = orderedBars.find(shouldRememberOhlcSanityReference);
   const firstBarTime = firstReferenceBar ? getOhlcSanityBarTime(firstReferenceBar) : null;
   // When filling a large time gap (e.g. DB cache stale for weeks, repair batch
@@ -2421,7 +2449,7 @@ export function createOhlcSanityReferenceTracker(
       return true;
     }
 
-    const decision = evaluateOhlcBarSanity(symbol, bar, reference?.close);
+    const decision = evaluateOhlcBarSanity(symbol, bar, reference?.close, { bucketMs: options.bucketMs });
     if (!decision.accepted) {
       reject(bar, decision, source);
       return false;
@@ -5777,7 +5805,7 @@ class OhlcWebSocketService {
         bar,
         source,
         reference?.close,
-        options,
+        { ...options, bucketMs: this._bucketMsForKey(key) },
       )
     ) {
       return false;
@@ -6880,6 +6908,7 @@ class OhlcWebSocketService {
           bar,
           source,
           keyReferenceClose,
+          { bucketMs: this._bucketMsForKey(key) },
         )
       ) {
         return false;

@@ -8,13 +8,16 @@ import { GlobalLayoutWrapper } from "@/components/layout/global-layout-wrapper";
 
 export const metadata: Metadata = {
   title: {
-    default: "Yopips Web Terminal",
-    template: "%s | Yopips",
+    default: "ASR Web Terminal",
+    template: "%s | ASR",
   },
-  description: "Yopips web terminal for trading accounts, market data, charts, and order management.",
+  description: "ASR web terminal for trading accounts, market data, charts, and order management.",
   icons: {
-    icon: "/favicon.ico",
-    apple: "/assets/yopips-logo-white.png",
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/brand/favicon.svg", type: "image/svg+xml" },
+    ],
+    apple: "/brand/apple-touch-icon.png",
   },
 };
 

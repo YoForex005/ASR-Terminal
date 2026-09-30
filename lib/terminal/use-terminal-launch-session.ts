@@ -13,6 +13,7 @@ import {
   createAndExchangeTerminalSession,
   exchangeTerminalLaunchCode,
   getTerminalApiBaseUrl,
+  refreshTerminalWsTickets,
   getTerminalWsBaseUrl,
 } from '@/lib/terminal/ticket-terminal-client';
 
@@ -42,7 +43,8 @@ interface UseTerminalLaunchSessionResult {
 
 type TerminalSessionStart =
   | { mode: 'launch-code'; launchCode: string }
-  | { mode: 'account-login'; login: string };
+  | { mode: 'account-login'; login: string }
+  | { mode: 'resume'; login: string };
 
 const TERMINAL_EXPIRY_SAFETY_WINDOW_MS = 5_000;
 
@@ -167,6 +169,85 @@ const removeLaunchCodeFromLocation = (): void => {
   window.history.replaceState(window.history.state, '', nextUrl);
 };
 
+// A launch code is single-use, so a page refresh cannot exchange it again.
+// Keep the exchanged terminal session for this browser tab only (sessionStorage
+// is per-tab and cleared when the tab closes) and resume it on reload by minting
+// fresh websocket tickets with the terminal token.
+const TERMINAL_SESSION_STORAGE_KEY = 'asr-terminal-session';
+
+interface StoredTerminalSession {
+  terminalToken: string;
+  accountContext?: Record<string, unknown>;
+  initialStateTransport?: string;
+  expiresAtMs: number;
+}
+
+const readStoredTerminalSession = (): StoredTerminalSession | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(TERMINAL_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const terminalToken = parseString(parsed.terminalToken);
+    const expiresAtMs = parseNumber(parsed.expiresAtMs);
+    if (!terminalToken || expiresAtMs - TERMINAL_EXPIRY_SAFETY_WINDOW_MS <= Date.now()) {
+      window.sessionStorage.removeItem(TERMINAL_SESSION_STORAGE_KEY);
+      return null;
+    }
+    return {
+      terminalToken,
+      accountContext: isRecord(parsed.accountContext) ? parsed.accountContext : undefined,
+      initialStateTransport: parseString(parsed.initialStateTransport) || undefined,
+      expiresAtMs,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const storeTerminalSession = (payload: TerminalExchangeResponse): void => {
+  if (typeof window === 'undefined') return;
+  const expiresInSeconds = Number(payload.expires_in);
+  if (!payload.terminal_token || !Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) return;
+  const stored: StoredTerminalSession = {
+    terminalToken: payload.terminal_token,
+    accountContext: getAccountContext(payload),
+    initialStateTransport: payload.initial_state_transport,
+    expiresAtMs: Date.now() + expiresInSeconds * 1_000,
+  };
+  try {
+    window.sessionStorage.setItem(TERMINAL_SESSION_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // Storage unavailable (private mode, quota): refresh will need a new launch.
+  }
+};
+
+const clearStoredTerminalSession = (): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(TERMINAL_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+};
+
+const resumeStoredTerminalSession = async (
+  stored: StoredTerminalSession,
+): Promise<TerminalExchangeResponse> => {
+  const tickets = await refreshTerminalWsTickets(stored.terminalToken, getTerminalApiBaseUrl());
+  return {
+    success: true,
+    terminal_token: stored.terminalToken,
+    feed_ticket: tickets.feed_ticket,
+    trade_ticket: tickets.trade_ticket,
+    ws_ticket_expires_in: tickets.expires_in,
+    expires_in: Math.max(1, Math.floor((stored.expiresAtMs - Date.now()) / 1_000)),
+    account_context: stored.accountContext,
+    initial_state_transport: stored.initialStateTransport,
+  } as TerminalExchangeResponse;
+};
+
 const parseAccountLogin = (accountId: string | null | undefined): string | null => {
   const candidate = accountId?.trim().replace(/^mt5-/i, '') ?? '';
   if (!/^\d+$/.test(candidate) || Number(candidate) <= 0) return null;
@@ -183,13 +264,30 @@ const acquireTerminalExchange = (
 ): Promise<TerminalExchangeResponse> => {
   const key = start.mode === 'launch-code'
     ? `launch:${start.launchCode}`
-    : `account:${start.login}`;
+    : `${start.mode}:${start.login}`;
   const pending = pendingExchangeByKey.get(key);
   if (pending) return pending;
 
-  const request = start.mode === 'launch-code'
-    ? exchangeTerminalLaunchCode(start.launchCode, getTerminalApiBaseUrl())
-    : createAndExchangeTerminalSession(start.login, getTerminalApiBaseUrl());
+  const exchangeOrResume = async (): Promise<TerminalExchangeResponse> => {
+    if (start.mode === 'resume') {
+      const stored = readStoredTerminalSession();
+      if (!stored) throw new Error('Terminal session expired. Reopen it from the dashboard.');
+      return resumeStoredTerminalSession(stored);
+    }
+    if (start.mode === 'account-login') {
+      return createAndExchangeTerminalSession(start.login, getTerminalApiBaseUrl());
+    }
+    try {
+      return await exchangeTerminalLaunchCode(start.launchCode, getTerminalApiBaseUrl());
+    } catch (launchError) {
+      // A refresh re-reads a launch code this tab already exchanged. Resume the
+      // tab's stored session instead of failing on the spent one-time code.
+      const stored = readStoredTerminalSession();
+      if (!stored) throw launchError;
+      return resumeStoredTerminalSession(stored);
+    }
+  };
+  const request = exchangeOrResume();
   pendingExchangeByKey.set(key, request);
   void request.then(
     () => pendingExchangeByKey.delete(key),
@@ -210,6 +308,11 @@ export const useTerminalLaunchSession = (
   const sessionStart = useMemo<TerminalSessionStart | null>(() => {
     if (locationLaunchCode) {
       return { mode: 'launch-code', launchCode: locationLaunchCode };
+    }
+    const stored = readStoredTerminalSession();
+    const storedLogin = stored ? parseLogin(stored.accountContext) : 0;
+    if (stored && (!accountLogin || String(storedLogin) === accountLogin)) {
+      return { mode: 'resume', login: storedLogin > 0 ? String(storedLogin) : 'session' };
     }
     return accountLogin ? { mode: 'account-login', login: accountLogin } : null;
   }, [accountLogin, locationLaunchCode]);
@@ -259,6 +362,7 @@ export const useTerminalLaunchSession = (
         clearTimeout(terminalExpiryTimer);
         terminalExpiryTimer = null;
       }
+      clearStoredTerminalSession();
       clientRef.current?.expireSession();
       clientRef.current = null;
       setExchange(null);
@@ -282,6 +386,7 @@ export const useTerminalLaunchSession = (
         }
 
         didExchange = true;
+        storeTerminalSession(payload);
         setExchange(payload);
         if (sessionStart.mode === 'launch-code') {
           removeLaunchCodeFromLocation();
@@ -427,6 +532,7 @@ export const useTerminalLaunchSession = (
         setStatus('error');
         setError(message);
         if (!didExchange) {
+          if (sessionStart.mode === 'resume') clearStoredTerminalSession();
           setExchange(null);
           setConnectionStatus('disconnected');
           setConnectionError(message);

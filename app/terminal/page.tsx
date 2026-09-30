@@ -5,6 +5,11 @@ import type { CSSProperties } from 'react';
 import dynamic from 'next/dynamic';
 import { useTheme } from 'next-themes';
 import { useRouter, useSearchParams } from 'next/navigation';
+import {
+    TERMINAL_SESSION_ENDED_MESSAGE,
+    getTerminalDashboardUrl,
+    isTerminalSessionEndedError,
+} from '@/lib/terminal/ticket-terminal-client';
 import { Clock, CheckCircle2, X, AlarmClock, Server, Wifi, ChevronDown, ChevronRight, Menu, TrendingUp, Briefcase, Globe, Settings, Bell, Calendar } from 'lucide-react';
 import { useAuth } from '@/components/auth/auth-provider';
 import Header from '@/components/terminal/Header';
@@ -32,7 +37,7 @@ import { getLivePriceSnapshotBySymbol, useHasLiveQuotes, useLivePricePresence, u
 import { buildOhlcSessionScopeId } from '@/lib/trading/use-auto-connect';
 import type { WebSocketTradingClient } from '@/lib/trading/websocket-client';
 import type { TradingAccount as DashboardTradingAccount } from '@/types/dashboard';
-import type { Order as WebtraderOrder, OrderType as WebtraderOrderType, Position as WebtraderPosition, SymbolInfo, TradeRequest, TradeResult, TradingAccountInfo } from '@/types/webtrader';
+import type { Deal as WebtraderDeal, Order as WebtraderOrder, OrderType as WebtraderOrderType, Position as WebtraderPosition, SymbolInfo, TradeRequest, TradeResult, TradingAccountInfo } from '@/types/webtrader';
 import {
     isContinuityBar,
     ohlcService,
@@ -170,6 +175,58 @@ const TERMINAL_POST_CLOSE_RECONCILE_TIMEOUT_MS = 5_000;
 const TERMINAL_POST_TRADE_RECONCILE_REFRESH_DELAYS_MS = [0, 500, 1_200, 2_500, 5_000, 9_000] as const;
 const TERMINAL_CLOSED_HISTORY_LOOKBACK_DAYS = 30;
 const TERMINAL_CLOSED_HISTORY_MAX_ROWS = 500;
+
+// One Closed-tab row per exit deal. The exit deal of a BUY position is a SELL,
+// so direction, open price and open time come from the matching entry deal
+// (same positionId). Row id is the position ticket, matching the rows added
+// locally when a position is closed from this terminal.
+const buildClosedTradesFromDeals = (deals: readonly WebtraderDeal[]): ClosedTrade[] => {
+    const entryByPosition = new Map<number, WebtraderDeal>();
+    for (const deal of deals) {
+        if (deal.entry === 'in' && deal.positionId) entryByPosition.set(deal.positionId, deal);
+    }
+    const exitCountByPosition = new Map<number, number>();
+    for (const deal of deals) {
+        if ((deal.entry === 'out' || deal.entry === 'outby') && deal.positionId) {
+            exitCountByPosition.set(deal.positionId, (exitCountByPosition.get(deal.positionId) ?? 0) + 1);
+        }
+    }
+
+    return deals
+        .filter((deal) =>
+            (deal.entry === 'out' || deal.entry === 'outby') &&
+            (deal.type === 'buy' || deal.type === 'sell'),
+        )
+        .map((deal) => {
+            const entryDeal = deal.positionId ? entryByPosition.get(deal.positionId) : undefined;
+            const isPartialExit = deal.positionId ? (exitCountByPosition.get(deal.positionId) ?? 0) > 1 : false;
+            const positionType: ClosedTrade['type'] = entryDeal
+                ? (entryDeal.type === 'sell' ? 'sell' : 'buy')
+                : (deal.type === 'sell' ? 'buy' : 'sell');
+            const closeTime = toMt5IsoString(deal.time);
+            return {
+                id: deal.positionId && !isPartialExit ? String(deal.positionId) : String(deal.ticket),
+                symbol: deal.symbol,
+                type: positionType,
+                volume: deal.volume,
+                openPrice: entryDeal?.price ?? 0,
+                closePrice: deal.price,
+                profit: deal.profit,
+                openTime: entryDeal ? toMt5IsoString(entryDeal.time) : closeTime,
+                closeTime,
+            };
+        })
+        .sort((a, b) => b.closeTime.localeCompare(a.closeTime));
+};
+
+const mergeClosedTrades = (current: ClosedTrade[], incoming: ClosedTrade[]): ClosedTrade[] => {
+    const byId = new Map(current.map((trade) => [trade.id, trade]));
+    // Broker history is authoritative over the optimistic local row.
+    for (const trade of incoming) byId.set(trade.id, trade);
+    return Array.from(byId.values())
+        .sort((a, b) => b.closeTime.localeCompare(a.closeTime))
+        .slice(0, TERMINAL_CLOSED_HISTORY_MAX_ROWS);
+};
 const TERMINAL_SELECTED_OHLC_HISTORY_PRIME_LIMIT = 100;
 const TERMINAL_BOOTSTRAP_OHLC_HISTORY_PRIME_LIMIT = 100;
 const TERMINAL_BOOTSTRAP_OHLC_HISTORY_SYMBOL_LIMIT = DEFAULT_FIRST_RUN_TERMINAL_SYMBOLS.length + 1;
@@ -2647,17 +2704,13 @@ function TerminalLaunchLoadingOverlay({ error }: { error?: string | null }) {
                     <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-destructive/10 ring-8 ring-destructive/5">
                         <X className="h-6 w-6 text-destructive" strokeWidth={2.5} />
                     </div>
-                    <p className="text-[17px] font-bold tracking-tight text-white">Terminal Connection Error</p>
+                    <p className="text-[17px] font-bold tracking-tight text-white">
+                        {isTerminalSessionEndedError(error) ? 'Terminal Session Ended' : 'Terminal Connection Error'}
+                    </p>
                     <p className="mt-3 text-[14px] leading-relaxed text-white/70">
                         {error || 'The terminal connection failed to establish.'}
                     </p>
-                    <button
-                        type="button"
-                        onClick={() => window.location.reload()}
-                        className="mt-8 rounded-[8px] bg-white px-6 py-2.5 text-[13px] font-bold tracking-wide text-[#0e0f11] shadow-sm transition-all hover:scale-[1.02] hover:bg-white/90 active:scale-[0.98]"
-                    >
-                        Reload Terminal
-                    </button>
+                    <TerminalErrorActions />
                 </div>
             ) : (
                 <div className="terminal-launch-loading-dots" aria-hidden="true">
@@ -2672,6 +2725,31 @@ function TerminalLaunchLoadingOverlay({ error }: { error?: string | null }) {
     );
 }
 
+
+// Primary action returns to the dashboard, where "Open Terminal" issues a fresh
+// launch link; reload stays available for transient connection failures.
+function TerminalErrorActions() {
+    const dashboardUrl = getTerminalDashboardUrl();
+    return (
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+            {dashboardUrl ? (
+                <a
+                    href={dashboardUrl}
+                    className="rounded-[8px] bg-primary px-6 py-2.5 text-[13px] font-bold tracking-wide text-primary-foreground shadow-sm transition-all hover:scale-[1.02] active:scale-[0.98]"
+                >
+                    Back to Dashboard
+                </a>
+            ) : null}
+            <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="rounded-[8px] border border-border px-6 py-2.5 text-[13px] font-bold tracking-wide text-foreground transition-all hover:bg-accent active:scale-[0.98]"
+            >
+                Reload Terminal
+            </button>
+        </div>
+    );
+}
 
 function TerminalOhlcHistoryDebugPanel({
     isAvailable,
@@ -6961,34 +7039,8 @@ function TradingDashboardInner() {
                 return;
             }
 
-            const closedFromHistory: ClosedTrade[] = deals
-                .filter((deal) =>
-                    (deal.entry === 'out' || deal.entry === 'outby') &&
-                    (deal.type === 'buy' || deal.type === 'sell'),
-                )
-                .map((deal) => {
-                    const closeTime = deal.time instanceof Date
-                        ? deal.time.toISOString().replace('T', ' ').slice(0, 19)
-                        : String(deal.time);
-
-                    return {
-                        id: String(deal.ticket),
-                        symbol: deal.symbol,
-                        type: deal.type === 'sell' ? ('sell' as const) : ('buy' as const),
-                        volume: deal.volume,
-                        openPrice: 0,
-                        closePrice: deal.price,
-                        profit: deal.profit,
-                        openTime: closeTime,
-                        closeTime,
-                    };
-                });
-
-            setClosedTrades((prev) => {
-                const existingIds = new Set(prev.map((trade) => trade.id));
-                const fresh = closedFromHistory.filter((trade) => !existingIds.has(trade.id));
-                return [...prev, ...fresh].slice(0, TERMINAL_CLOSED_HISTORY_MAX_ROWS);
-            });
+            const closedFromHistory = buildClosedTradesFromDeals(deals);
+            setClosedTrades((prev) => mergeClosedTrades(prev, closedFromHistory));
             setClosedHistoryState({
                 isLoading: false,
                 isLoaded: true,
@@ -7032,38 +7084,11 @@ function TradingDashboardInner() {
             // When MT5 executes a trade, it broadcasts a history update.
             // Instantly parse the deals and update the closed trades table!
             const incomingDeals = message.payload;
-            console.log("MT5 LIVE HISTORY DUMP:", incomingDeals);
             if (!Array.isArray(incomingDeals)) return;
-            
-            const freshTrades = incomingDeals
-                .filter((deal: any) =>
-                    (deal.entry === 'out' || deal.entry === 'outby') &&
-                    (deal.type === 'buy' || deal.type === 'sell')
-                )
-                .map((deal: any) => {
-                    const closeTime = deal.time instanceof Date
-                        ? deal.time.toISOString().replace('T', ' ').slice(0, 19)
-                        : String(deal.time);
-                    return {
-                        id: String(deal.ticket),
-                        symbol: deal.symbol,
-                        type: deal.type === 'sell' ? 'sell' as const : 'buy' as const,
-                        volume: deal.volume,
-                        openPrice: 0, // WebSocket payload for deals doesn't carry openPrice natively
-                        closePrice: deal.price,
-                        profit: deal.profit,
-                        openTime: closeTime, // Fallback
-                        closeTime,
-                    };
-                });
 
+            const freshTrades = buildClosedTradesFromDeals(incomingDeals as WebtraderDeal[]);
             if (freshTrades.length > 0) {
-                setClosedTrades((prev) => {
-                    const existingIds = new Set(prev.map((t) => t.id));
-                    const newTrades = freshTrades.filter((t) => !existingIds.has(t.id));
-                    if (newTrades.length === 0) return prev;
-                    return [...newTrades, ...prev].slice(0, TERMINAL_CLOSED_HISTORY_MAX_ROWS);
-                });
+                setClosedTrades((prev) => mergeClosedTrades(prev, freshTrades));
             }
         });
 
@@ -8725,6 +8750,13 @@ function TradingDashboardInner() {
         return <TerminalLaunchLoadingOverlay />;
     }
 
+    // No launch code, no resumable tab session and no dashboard account: there is
+    // nothing to connect, so send the user back to the dashboard instead of
+    // rendering an empty "Account #unknown" terminal.
+    if (!terminalLaunchSession.isActive && !activeTradingAccount && !isSnapshotLoading) {
+        return <TerminalLaunchLoadingOverlay error={TERMINAL_SESSION_ENDED_MESSAGE} />;
+    }
+
     return (
         <>
         {terminalOpeningOverlayActive && (
@@ -8952,16 +8984,13 @@ function TradingDashboardInner() {
                                             <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-destructive/10 ring-8 ring-destructive/5">
                                                 <X className="h-6 w-6 text-destructive" strokeWidth={2.5} />
                                             </div>
-                                            <p className="text-[17px] font-bold text-foreground tracking-tight">Terminal Connection Error</p>
+                                            <p className="text-[17px] font-bold text-foreground tracking-tight">
+                                                {isTerminalSessionEndedError(connectError) ? 'Terminal Session Ended' : 'Terminal Connection Error'}
+                                            </p>
                                             <p className="mt-3 text-[14px] leading-relaxed text-muted-foreground/90">
                                                 {connectError || activeGroupSymbolsState.error || 'The terminal connection failed to establish.'}
                                             </p>
-                                            <button
-                                                onClick={() => window.location.reload()}
-                                                className="mt-8 rounded-[8px] bg-primary px-6 py-2.5 text-[13px] font-bold tracking-wide text-primary-foreground shadow-sm hover:bg-primary/90 transition-all hover:scale-[1.02] active:scale-[0.98]"
-                                            >
-                                                Reload Terminal
-                                            </button>
+                                            <TerminalErrorActions />
                                         </div>
                                     </div>
                                 ) : (

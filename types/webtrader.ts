@@ -256,6 +256,7 @@ export interface Deal {
   externalId?: string;
   time: Date;
   magic?: number;
+  positionId?: number;
 }
 
 // ============================================================================

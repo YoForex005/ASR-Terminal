@@ -17,8 +17,8 @@
     --card-foreground: 222 47% 11%;
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
-    --primary: 253 74% 54%;           /* ASR light primary #5A35E0 */
-    --primary-foreground: 0 0% 100%;
+    --primary: 142 71% 45%;           /* Premium Green */
+    --primary-foreground: 222 47% 11%;
     --secondary: 210 40% 96.1%;
     --secondary-foreground: 222 47% 11%;
     --muted: 210 40% 96.1%;           /* #f1f5f9 */
@@ -29,7 +29,7 @@
     --destructive-foreground: 0 0% 100%;
     --border: 215 16% 84%;            /* #cbd5e1 - Slate 300 for clearer thin border */
     --input: 214 32% 91%;
-    --ring: 253 74% 54%;
+    --ring: 142 71% 45%;
     --radius: 0.5rem;
     --success: 142 76% 36%;
     --warning: 45 93% 47%;
@@ -54,8 +54,8 @@
     --card-foreground: 204 13% 94%;
     --popover: 222 26% 12%;
     --popover-foreground: 204 13% 94%;
-    --primary: 190 100% 50%;          /* ASR cyan #00D4FF */
-    --primary-foreground: 225 46% 5%;
+    --primary: 142 69% 58%;
+    --primary-foreground: 222 26% 11%;
     --secondary: 222 26% 11%;
     --secondary-foreground: 204 13% 94%;
     --muted: 220 22% 14%;
@@ -66,7 +66,7 @@
     --destructive-foreground: 0 0% 100%;
     --border: 218 16% 20%;
     --input: 218 16% 20%;
-    --ring: 190 100% 50%;
+    --ring: 142 69% 58%;
     --success: 144 57% 54%;
     --warning: 52 100% 50%;
     --success-05: rgba(70, 205, 124, 0.05);
@@ -83,8 +83,8 @@
     --card-foreground: 204 13% 94%;
     --popover: 222 26% 12%;
     --popover-foreground: 204 13% 94%;
-    --primary: 190 100% 50%;          /* ASR cyan #00D4FF */
-    --primary-foreground: 225 46% 5%;
+    --primary: 142 69% 58%;           /* Premium Light Green */
+    --primary-foreground: 222 26% 11%;
     --secondary: 222 26% 11%;
     --secondary-foreground: 204 13% 94%;
     --muted: 220 22% 14%;
@@ -95,7 +95,7 @@
     --destructive-foreground: 0 0% 100%;
     --border: 218 16% 20%;            /* #2a2f3a */
     --input: 218 16% 20%;
-    --ring: 190 100% 50%;
+    --ring: 142 69% 58%;
 
     --success: 144 57% 54%;           /* rgba(70, 205, 124, 1) — Exness Success Main */
     --warning: 52 100% 50%;           /* Exness Yellow */
@@ -312,24 +312,4 @@
   100% {
     box-shadow: inset 0 0 0 1px transparent;
   }
-}
-
-/* ---- ASR brand gradient ----
-   Solid brand fills (primary buttons, active-tab bars, checked boxes) use the
-   ASR logo gradient in both themes, matching the ASR client app. Only the solid
-   bg-primary utility is targeted: tinted fills (bg-primary/10) and buy/sell
-   colours (--success / --destructive) are untouched. */
-:root {
-  --brand-gradient: linear-gradient(90deg, #00D4FF 0%, #7B5CFF 50%, #FF2D8D 100%);
-}
-html .bg-primary {
-  background-image: var(--brand-gradient);
-  background-size: 100% 100%;
-}
-html .bg-primary.text-primary-foreground,
-html .bg-primary .text-primary-foreground {
-  color: #FFFFFF;
-}
-html .bg-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
 }

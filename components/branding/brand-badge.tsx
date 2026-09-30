@@ -70,27 +70,29 @@ export function BrandBadge({
       </div>
 
       <Image
-        src="/assets/logo.png"
-        alt="Yopips logo"
+        src="/brand/ASR_light.svg"
+        alt="ASR logo"
         width={240}
-        height={72}
+        height={54}
         priority={priority}
+        unoptimized
         className={cn(
           "relative z-[1] object-contain select-none transition-all duration-500 block dark:hidden",
-          "drop-shadow-[0_0_8px_rgba(16,185,129,0.3)]",
+          "drop-shadow-[0_0_8px_rgba(0,212,255,0.3)]",
           style.image,
           imageClassName
         )}
       />
       <Image
-        src="/assets/logo_white.png"
-        alt="Yopips logo"
+        src="/brand/ASR.svg"
+        alt="ASR logo"
         width={240}
-        height={72}
+        height={54}
         priority={priority}
+        unoptimized
         className={cn(
           "relative z-[1] object-contain select-none transition-all duration-500 hidden dark:block",
-          "drop-shadow-[0_0_12px_rgba(16,185,129,0.4)]",
+          "drop-shadow-[0_0_12px_rgba(123,92,255,0.4)]",
           style.image,
           imageClassName
         )}
