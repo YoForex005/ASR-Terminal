@@ -31,19 +31,15 @@ jobs:
 
             echo "Starting deployment..."
 
-            # Save the currently deployed commit for rollback
             PREVIOUS_COMMIT="$(git rev-parse HEAD)"
 
             rollback() {
-            
               echo "Deployment failed. Rolling back to $PREVIOUS_COMMIT"
-
-              # Prevent the ERR trap from running recursively
               trap - ERR
 
               git reset --hard "$PREVIOUS_COMMIT"
 
-              npm ci
+              npm ci --prefer-offline
               npm run build
 
               pm2 restart asrterminal --update-env
@@ -51,7 +47,6 @@ jobs:
               echo "Rollback completed."
             }
 
-            # Automatically rollback if a deployment command fails
             trap 'rollback' ERR
 
             echo "Fetching latest code..."
@@ -61,7 +56,7 @@ jobs:
             git reset --hard origin/main
 
             echo "Installing dependencies..."
-            npm ci
+            npm ci --prefer-offline
 
             echo "Building application..."
             npm run build
@@ -92,6 +87,4 @@ jobs:
             done
 
             echo "Health check failed after 3 attempts."
-            echo "Triggering rollback..."
-
             exit 1
