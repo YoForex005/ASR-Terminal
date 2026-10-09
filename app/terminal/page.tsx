@@ -7463,6 +7463,13 @@ function TradingDashboardInner() {
         }
         return seeds;
     }, [terminalPositions]);
+    const positionsBySymbol = useMemo(() => {
+        const grouped: Record<string, typeof terminalPositions> = {};
+        for (const position of terminalPositions) {
+            (grouped[position.symbol] ??= []).push(position);
+        }
+        return grouped;
+    }, [terminalPositions]);
     const priceDigits = selectedInstrument?.digits ?? 5;
     useEffect(() => {
         if (terminalConnectionStatus !== 'ready' || !connectAccountId || storeSymbols.length === 0) {
@@ -8862,6 +8869,7 @@ function TradingDashboardInner() {
                                         instruments={instruments}
                                         searchInstruments={catalogInstruments}
                                         positionPriceSeedsBySymbol={positionPriceSeedsBySymbol}
+                                        positionsBySymbol={positionsBySymbol}
                                         selectedSymbol={selectedSymbol}
                                         onSelect={handleSelectSymbol}
                                         onClose={() => setActivePanel(null)}

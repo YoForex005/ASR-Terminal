@@ -1,11 +1,12 @@
 'use client';
 
-import type { Instrument } from '@/lib/terminal/types';
+import type { Instrument, Position } from '@/lib/terminal/types';
 import { Search, MoreVertical, X, ChevronDown, Star } from 'lucide-react';
 import { memo, startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type UIEvent } from 'react';
 import { SymbolIcon } from './SymbolIcon';
 import { formatTerminalDisplaySymbol, getSafeLiveQuoteSnapshotBySymbol } from '@/lib/trading/terminal-symbols';
 import { subscribeToLivePriceBySymbol, getLivePriceSnapshotBySymbol, useWebtraderStore } from '@/store/webtrader-store';
+import { computeOpenPositionLivePrice, computeOpenPositionLiveProfit } from '@/lib/terminal/live-position-pnl';
 
 type DisplayInstrument = Pick<Instrument, 'symbol' | 'name' | 'category' | 'digits' | 'tradeMode'>;
 
@@ -13,6 +14,7 @@ interface InstrumentsPanelProps {
     instruments: DisplayInstrument[];
     searchInstruments?: DisplayInstrument[];
     positionPriceSeedsBySymbol?: Readonly<Record<string, number>>;
+    positionsBySymbol?: Readonly<Record<string, readonly Position[]>>;
     selectedSymbol: string;
     onSelect: (symbol: string) => void;
     onClose: () => void;
@@ -49,6 +51,7 @@ interface InstrumentRowProps {
     isFavorite: boolean;
     isHighlighted: boolean;
     positionPriceSeed?: number;
+    positions?: readonly Position[];
     rowHeight: number;
     onSelect: (symbol: string) => void;
     onToggleFavorite: (symbol: string) => void;
@@ -177,6 +180,22 @@ const hasDisplayQuote = (bid: number, ask: number, last: number) =>
 const getDisplayQuoteSeed = (value: number | undefined) =>
     typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 
+const quoteDayKey = (time: unknown) => {
+    const timestamp = time instanceof Date
+        ? time.getTime()
+        : typeof time === 'number'
+            ? time
+            : typeof time === 'string'
+                ? Date.parse(time)
+                : NaN;
+    return Number.isFinite(timestamp) ? new Date(timestamp).toISOString().slice(0, 10) : '';
+};
+
+const formatPnl = (value: number) => {
+    const absolute = Math.abs(value).toFixed(2);
+    return `${value > 0 ? '+' : value < 0 ? '-' : ''}${absolute}`;
+};
+
 const getQuoteFlashClass = (direction?: 'up' | 'down' | 'same') =>
     direction === 'up' ? 'quote-flash-up' : direction === 'down' ? 'quote-flash-down' : 'quote-flash-tick';
 
@@ -205,6 +224,7 @@ const InstrumentRow = memo(function InstrumentRow({
     isFavorite,
     isHighlighted,
     positionPriceSeed,
+    positions = [],
     rowHeight,
     onSelect,
     onToggleFavorite,
@@ -216,6 +236,7 @@ const InstrumentRow = memo(function InstrumentRow({
     const askTextRef = useRef<HTMLSpanElement>(null);
     const arrowRef = useRef<HTMLSpanElement>(null);
     const changeRef = useRef<HTMLSpanElement>(null);
+    const pnlRef = useRef<HTMLSpanElement>(null);
     const bidCellRef = useRef<HTMLTableCellElement>(null);
     const askCellRef = useRef<HTMLTableCellElement>(null);
     const changeCellRef = useRef<HTMLTableCellElement>(null);
@@ -227,6 +248,9 @@ const InstrumentRow = memo(function InstrumentRow({
     const lastPriceRef = useRef<{ bid: number; ask: number; last: number }>({ bid: 0, ask: 0, last: 0 });
     const positionPriceSeedRef = useRef(getDisplayQuoteSeed(positionPriceSeed));
     positionPriceSeedRef.current = getDisplayQuoteSeed(positionPriceSeed);
+    const positionsRef = useRef(positions);
+    positionsRef.current = positions;
+    const sessionOpenRef = useRef<{ day: string; price: number }>({ day: '', price: 0 });
     // Persist the last meaningful direction so 'same' ticks don't wipe out the arrow
     const lastSignalDirRef = useRef<'up' | 'down' | null>(null);
     // Track when the last real price tick arrived (to detect stale/closed markets)
@@ -333,12 +357,35 @@ const InstrumentRow = memo(function InstrumentRow({
                 }
             }
 
-            // Change %
+            // Change since the first quote received for the current quote day.
+            // PriceTick does not expose the broker's official daily open, so using
+            // that label would be misleading when the terminal opens mid-session.
             if (changeRef.current && changeCellRef.current) {
-                const pct = liveLast > 0 && bid > 0 ? ((bid - liveLast) / liveLast) * 100 : 0;
-                changeRef.current.textContent = `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
+                const quote = displayBid || displayAsk;
+                const day = quoteDayKey((snap as any)?.mt5TimeMsc ?? (snap as any)?.mt5_time_msc ?? snap?.time);
+                if (quote > 0 && day && (sessionOpenRef.current.day !== day || sessionOpenRef.current.price <= 0)) {
+                    sessionOpenRef.current = { day, price: quote };
+                }
+                const baseline = sessionOpenRef.current.price;
+                const pct = baseline > 0 && quote > 0 ? ((quote - baseline) / baseline) * 100 : 0;
+                changeRef.current.textContent = baseline > 0 ? `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%` : '--';
                 const color = pct > 0 ? 'var(--success, #089981)' : pct < 0 ? 'var(--destructive, #f23645)' : '';
                 changeCellRef.current.style.color = color || 'rgba(156,163,175,0.7)';
+            }
+
+            // Aggregate the live P/L of this account's open positions in the
+            // instrument. The same quote stream drives every row; no extra request.
+            if (pnlRef.current) {
+                const pnl = positionsRef.current.reduce((total, position) => {
+                    const livePrice = computeOpenPositionLivePrice(position, snap);
+                    return total + computeOpenPositionLiveProfit(position, livePrice, snap);
+                }, 0);
+                pnlRef.current.textContent = positionsRef.current.length > 0 ? formatPnl(pnl) : '-';
+                pnlRef.current.style.color = pnl > 0
+                    ? 'var(--success, #089981)'
+                    : pnl < 0
+                        ? 'var(--destructive, #f23645)'
+                        : 'rgba(156,163,175,0.7)';
             }
 
             // Flash highlight on bid/ask cells
@@ -370,7 +417,7 @@ const InstrumentRow = memo(function InstrumentRow({
 
         update();
         return subscribeToLivePriceBySymbol(sym, update);
-    }, [instrument.symbol, positionPriceSeed, priceHighlight]);
+    }, [instrument.symbol, instrument.tradeMode, positionPriceSeed, positions, priceHighlight]);
 
     const isSelected = instrument.symbol === selectedSymbol;
     // Live quote fields update through the direct symbol subscription above;
@@ -489,13 +536,16 @@ const InstrumentRow = memo(function InstrumentRow({
                     className="text-right py-[4px] px-2 font-mono text-[12px] tabular-nums"
                     style={{ color: 'rgba(156,163,175,0.7)' }}
                 >
-                    <span ref={changeRef}>0.00%</span>
+                    <span ref={changeRef}>--</span>
                 </td>
             )}
 
             {visibleColumns.pnl && (
-                <td className="text-right py-[4px] px-2 text-muted-foreground/50 font-mono text-[12px] tabular-nums">
-                    -
+                <td
+                    className="text-right py-[4px] px-2 font-mono text-[12px] tabular-nums"
+                    title="Live aggregate P/L for open positions in this instrument"
+                >
+                    <span ref={pnlRef}>-</span>
                 </td>
             )}
         </tr>
@@ -506,6 +556,7 @@ function InstrumentsPanel({
     instruments,
     searchInstruments,
     positionPriceSeedsBySymbol,
+    positionsBySymbol,
     selectedSymbol,
     onSelect,
     onClose,
@@ -901,8 +952,8 @@ function InstrumentsPanel({
                                     { id: 'signal', label: 'Signal' },
                                     { id: 'bid', label: 'Bid' },
                                     { id: 'ask', label: 'Ask' },
-                                    { id: 'oneDayChange', label: '1D Change' },
-                                    { id: 'pnl', label: 'P/L (USD)' },
+                                    { id: 'oneDayChange', label: 'Session Change' },
+                                    { id: 'pnl', label: 'P/L' },
                                 ].map((col) => (
                                     <div
                                         key={col.id}
@@ -990,7 +1041,7 @@ function InstrumentsPanel({
                             {visibleColumns.signal && <th className="text-center font-semibold py-[5px] px-1 border-r border-border w-[40px]">Signal</th>}
                             {visibleColumns.bid && <th className="text-right font-semibold py-[5px] px-2 border-r border-border min-w-[64px]">Bid</th>}
                             {visibleColumns.ask && <th className="text-right font-semibold py-[5px] px-2 border-r border-border min-w-[64px]">Ask</th>}
-                            {visibleColumns.oneDayChange && <th className="text-right font-semibold py-[5px] px-2 border-r border-border min-w-[72px]">Change</th>}
+                            {visibleColumns.oneDayChange && <th className="text-right font-semibold py-[5px] px-2 border-r border-border min-w-[72px]" title="Change since the first quote received on the current quote day">Change</th>}
                             {visibleColumns.pnl && <th className="text-right font-semibold py-[5px] px-2 min-w-[48px]">P/L</th>}
                         </tr>
                     </thead>
@@ -1033,6 +1084,7 @@ function InstrumentsPanel({
                                         isFavorite={favoriteSymbolSet.has(row.instrument.symbol)}
                                         isHighlighted={highlightedSearchIndex >= 0 && filteredInstruments[highlightedSearchIndex]?.symbol === row.instrument.symbol}
                                         positionPriceSeed={positionPriceSeedsBySymbol?.[row.instrument.symbol]}
+                                        positions={positionsBySymbol?.[row.instrument.symbol]}
                                         rowHeight={MARKET_ROW_HEIGHT}
                                         onSelect={handleSelectInstrument}
                                         onToggleFavorite={handleToggleFavorite}
